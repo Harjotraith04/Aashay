@@ -53,6 +53,8 @@ import CancelIcon from '@mui/icons-material/Cancel';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
 import EditIcon from '@mui/icons-material/Edit';
+import PersonIcon from '@mui/icons-material/Person';
+import PeopleIcon from '@mui/icons-material/People';
 
 import TuneIcon from '@mui/icons-material/Tune';
 import SortIcon from '@mui/icons-material/Sort';
@@ -93,43 +95,15 @@ const MergingPage = ({ projectId, codes = [], codeAssignments = [], documents = 
   const [documentContents, setDocumentContents] = useState({});
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    const fetchDocumentContents = async () => {
-      setLoading(true);
-      const docIds = [...new Set(codeAssignments.map(a => a.document_id))];
-      
-      const promises = docIds.map(docId => 
-        apiRequest(`/documents/${docId}`).catch(e => {
-          console.error(`Failed to fetch document ${docId}`, e);
-          return null;
-        })
-      );
-      
-      const results = await Promise.all(promises);
-      
-      const contents = {};
-      results.forEach(doc => {
-        if (doc) {
-          contents[doc.id] = doc.content;
-        }
-      });
-      
-      setDocumentContents(contents);
-      setLoading(false);
-    };
-
-    if (codeAssignments.length > 0) {
-      fetchDocumentContents();
-    } else {
-      setLoading(false);
-    }
-  }, [codeAssignments]);
-
   const [assignmentStatus, setAssignmentStatus] = useState({}); // Track status of assignments: pending, accepted, rejected
   const [isSaving, setIsSaving] = useState(false);
   const [statusSubTab, setStatusSubTab] = useState(0); // 0: pending, 1: accepted, 2: rejected
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitSuccess, setSubmitSuccess] = useState(false);
+
+  const [collaboratorSubmissions, setCollaboratorSubmissions] = useState([]);
+  const [loadingCollaboratorData, setLoadingCollaboratorData] = useState(false);
+  const [hasCollaborators, setHasCollaborators] = useState(false);
 
   // Initialize assignment status from codeAssignments data
   useEffect(() => {
@@ -470,6 +444,80 @@ const MergingPage = ({ projectId, codes = [], codeAssignments = [], documents = 
     }).filter(club => club.assignments.length > 0); // Remove clubs with no matching assignments
     
   }, [processedData, activeTab, statusSubTab, assignmentStatus]);
+
+  // Process collaborator submissions to handle overlapping codes
+  const processedCollaboratorData = useMemo(() => {
+    if (!collaboratorSubmissions || collaboratorSubmissions.length === 0) {
+      return [];
+    }
+
+    return collaboratorSubmissions.map(userSubmission => {
+      // 1. Group assignments by document
+      const groupedByDocument = userSubmission.assignments.reduce((acc, assignment) => {
+        const docId = assignment.document_id;
+        if (!acc[docId]) {
+          acc[docId] = {
+            documentName: assignment.document_name || 'Unknown Document',
+            documentId: docId,
+            assignments: [],
+          };
+        }
+        acc[docId].assignments.push(assignment);
+        return acc;
+      }, {});
+
+      // 2. Sort assignments within each document by start character
+      for (const docId in groupedByDocument) {
+        groupedByDocument[docId].assignments.sort((a, b) => a.start_char - b.start_char);
+      }
+
+      // 3. Club overlapping assignments
+      let clubbedData = [];
+      for (const docId in groupedByDocument) {
+        const assignments = groupedByDocument[docId].assignments;
+
+        if (assignments.length === 0) {
+          continue;
+        }
+        
+        let clubs = [];
+        if (assignments.length > 0) {
+          let currentClub = {
+            start_char: assignments[0].start_char,
+            end_char: assignments[0].end_char,
+            assignments: [assignments[0]],
+            documentName: groupedByDocument[docId].documentName,
+            documentId: docId,
+          };
+
+          for (let i = 1; i < assignments.length; i++) {
+            const currentAssignment = assignments[i];
+            if (currentAssignment.start_char < currentClub.end_char) {
+              currentClub.end_char = Math.max(currentClub.end_char, currentAssignment.end_char);
+              currentClub.assignments.push(currentAssignment);
+            } else {
+              clubs.push(currentClub);
+              currentClub = {
+                start_char: currentAssignment.start_char,
+                end_char: currentAssignment.end_char,
+                assignments: [currentAssignment],
+                documentName: groupedByDocument[docId].documentName,
+                documentId: docId,
+              };
+            }
+          }
+          clubs.push(currentClub);
+        }
+
+        clubbedData = clubbedData.concat(clubs);
+      }
+
+      return {
+        ...userSubmission,
+        clubbedData
+      };
+    });
+  }, [collaboratorSubmissions]);
 
   // Handle assignment accept - only updates local state
   const handleAcceptAssignment = (assignmentId) => {
@@ -1163,6 +1211,295 @@ const MergingPage = ({ projectId, codes = [], codeAssignments = [], documents = 
     }
   };
 
+  // Fetch collaborator submitted assignments
+  useEffect(() => {
+    const fetchCollaboratorData = async () => {
+      if (!projectId || !isOwner) return;
+      
+      setLoadingCollaboratorData(true);
+      try {
+        // Fetch project data with collaborator submissions
+        const projectResponse = await apiRequest(`/projects/${projectId}`);
+        
+        if (projectResponse && projectResponse.submitted_assignments_by_user) {
+          setCollaboratorSubmissions(projectResponse.submitted_assignments_by_user);
+          setHasCollaborators(projectResponse.submitted_assignments_by_user.length > 0);
+        } else {
+          console.error('No collaborator submission data found in project response');
+          setCollaboratorSubmissions([]);
+          setHasCollaborators(false);
+        }
+      } catch (error) {
+        console.error('Error fetching collaborator data:', error);
+        setCollaboratorSubmissions([]);
+        setHasCollaborators(false);
+      } finally {
+        setLoadingCollaboratorData(false);
+      }
+    };
+
+    fetchCollaboratorData();
+  }, [projectId, isOwner]);
+
+  useEffect(() => {
+    const fetchDocumentContents = async () => {
+      setLoading(true);
+      const docIds = [...new Set(codeAssignments.map(a => a.document_id))];
+      
+      const promises = docIds.map(docId => 
+        apiRequest(`/documents/${docId}`).catch(e => {
+          console.error(`Failed to fetch document ${docId}`, e);
+          return null;
+        })
+      );
+      
+      const results = await Promise.all(promises);
+      
+      const contents = {};
+      results.forEach(doc => {
+        if (doc) {
+          contents[doc.id] = doc.content;
+        }
+      });
+      
+      setDocumentContents(contents);
+      setLoading(false);
+    };
+
+    if (codeAssignments.length > 0) {
+      fetchDocumentContents();
+    } else {
+      setLoading(false);
+    }
+  }, [codeAssignments]);
+
+  // Render collaborator table row
+  const renderCollaboratorTableRow = (club, userSubmission, clubIndex) => {
+    const isExpanded = expandedRows[`${userSubmission.user_id}-${club.start_char}-${club.end_char}`];
+    const userName = userSubmission.user_name || `User ${userSubmission.user_id}`;
+    
+    return (
+      <React.Fragment key={`${userSubmission.user_id}-${club.start_char}-${club.end_char}`}>
+        <TableRow
+          hover
+          onClick={() => handleRowClick(`${userSubmission.user_id}-${club.start_char}-${club.end_char}`)}
+          sx={{
+            cursor: 'pointer',
+            '&:hover': {
+              backgroundColor: alpha(theme.palette.primary.main, 0.05),
+            },
+          }}
+        >
+          <TableCell>
+            <Typography variant="body2">{club.documentName}</Typography>
+          </TableCell>
+          <TableCell>
+            <Typography variant="body2">{truncateText(club.assignments[0].text, 100)}</Typography>
+          </TableCell>
+          <TableCell>
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+              {club.assignments.length > 1 ? (
+                // When multiple codes, show them without individual buttons
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                  {club.assignments.map((assignment, index) => (
+                    <Chip
+                      key={index}
+                      label={assignment.code.name}
+                      size="small"
+                      sx={{
+                        backgroundColor: assignment.code.color || theme.palette.primary.main,
+                        color: theme.palette.getContrastText(assignment.code.color || theme.palette.primary.main),
+                        '& .MuiChip-label': { fontWeight: 500 },
+                      }}
+                    />
+                  ))}
+                  <Typography variant="caption" color="text.secondary" sx={{ alignSelf: 'center', ml: 1 }}>
+                    ({club.assignments.length} codes - expand to view)
+                  </Typography>
+                </Box>
+              ) : (
+                // When single code
+                <Chip
+                  label={club.assignments[0].code.name}
+                  sx={{
+                    backgroundColor: club.assignments[0].code.color || theme.palette.primary.main,
+                    color: theme.palette.getContrastText(club.assignments[0].code.color || theme.palette.primary.main),
+                    '& .MuiChip-label': { fontWeight: 500 },
+                  }}
+                />
+              )}
+            </Box>
+          </TableCell>
+          <TableCell>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+              <Avatar sx={{ bgcolor: theme.palette.primary.main, width: 24, height: 24 }}>
+                <PersonIcon sx={{ fontSize: 14 }} />
+              </Avatar>
+              <Typography variant="body2">{userName}</Typography>
+            </Box>
+          </TableCell>
+        </TableRow>
+        <TableRow>
+          <TableCell style={{ paddingBottom: 0, paddingTop: 0 }} colSpan={4}>
+            <Collapse in={isExpanded} timeout="auto" unmountOnExit>
+              <Box sx={{ m: 1 }}>
+                <Card variant="outlined" sx={{ 
+                  backgroundColor: alpha(theme.palette.background.paper, 0.8),
+                  border: `1px solid ${alpha(theme.palette.divider, 0.2)}`,
+                }}>
+                  <CardContent sx={{ p: 1.5, '&:last-child': { pb: 1.5 } }}>
+                    {/* Full text */}
+                    <Box sx={{ 
+                      p: 2, 
+                      mb: 2, 
+                      borderRadius: 1, 
+                      backgroundColor: alpha(theme.palette.background.paper, 0.5),
+                      border: `1px solid ${alpha(theme.palette.primary.main, 0.1)}`,
+                    }}>
+                      <Typography variant="body2" sx={{ fontStyle: 'italic' }}>
+                        "{club.assignments[0].text}"
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+                        Chars: {club.start_char}-{club.end_char}
+                      </Typography>
+                    </Box>
+
+                    {/* Assignments Table - Detailed View */}
+                    {club.assignments.length > 0 && (
+                      <Box sx={{ mb: 1 }}>
+                        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+                          <Typography variant="caption" sx={{ fontWeight: 600, color: 'text.secondary' }}>
+                            Code Details ({club.assignments.length} {club.assignments.length === 1 ? 'code' : 'codes'})
+                          </Typography>
+                        </Box>
+                        
+                        <TableContainer 
+                          component={Paper} 
+                          sx={{ 
+                            borderRadius: '8px',
+                            background: `linear-gradient(135deg, ${alpha(theme.palette.background.paper, 0.95)} 0%, ${alpha(theme.palette.background.paper, 0.8)} 100%)`,
+                            backdropFilter: 'blur(10px)',
+                            border: `1px solid ${alpha(theme.palette.divider, 0.12)}`,
+                            boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)',
+                            maxHeight: '300px',
+                            mb: 1,
+                            overflowY: 'auto',
+                          }}
+                        >
+                          <Table size="small">
+                            <TableHead>
+                              <TableRow sx={{ 
+                                backgroundColor: alpha(theme.palette.primary.main, 0.08),
+                                '& .MuiTableCell-head': {
+                                  backgroundColor: alpha(theme.palette.primary.main, 0.08),
+                                  borderBottom: `2px solid ${alpha(theme.palette.primary.main, 0.2)}`,
+                                }
+                              }}>
+                                <TableCell sx={{ fontWeight: 600, color: 'text.primary' }}>Code</TableCell>
+                                <TableCell sx={{ fontWeight: 600, color: 'text.primary' }}>Description</TableCell>
+                                <TableCell sx={{ fontWeight: 600, color: 'text.primary' }}>Confidence</TableCell>
+                                <TableCell sx={{ fontWeight: 600, color: 'text.primary' }}>Date</TableCell>
+                              </TableRow>
+                            </TableHead>
+                            <TableBody>
+                              {club.assignments.map((assignment, index) => (
+                                <TableRow 
+                                  key={assignment.assignment_id}
+                                  sx={{ 
+                                    '&:hover': { 
+                                      backgroundColor: alpha(theme.palette.primary.main, 0.02),
+                                    },
+                                    '&:nth-of-type(odd)': {
+                                      backgroundColor: alpha(theme.palette.background.default, 0.3)
+                                    }
+                                  }}
+                                >
+                                  {/* Code */}
+                                  <TableCell sx={{ verticalAlign: 'top', p: 1.5 }}>
+                                    <Chip
+                                      label={assignment.code.name}
+                                      size="small"
+                                      sx={{
+                                        backgroundColor: assignment.code.color || theme.palette.primary.main,
+                                        color: theme.palette.getContrastText(assignment.code.color || theme.palette.primary.main),
+                                        '& .MuiChip-label': { fontWeight: 500 },
+                                      }}
+                                    />
+                                  </TableCell>
+                                  
+                                  {/* Description */}
+                                  <TableCell sx={{ verticalAlign: 'top', p: 1.5, maxWidth: '300px' }}>
+                                    <Typography variant="body2">
+                                      {assignment.code.description || 'No description'}
+                                    </Typography>
+                                  </TableCell>
+                                  
+                                  {/* Confidence */}
+                                  <TableCell sx={{ verticalAlign: 'top', p: 1.5 }}>
+                                    {assignment.confidence ? (
+                                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                        <Box sx={{ position: 'relative', display: 'inline-flex' }}>
+                                          <CircularProgress
+                                            variant="determinate"
+                                            value={assignment.confidence}
+                                            size={24}
+                                            thickness={4}
+                                            sx={{
+                                              color: (() => {
+                                                if (assignment.confidence >= 80) return theme.palette.success.main;
+                                                if (assignment.confidence >= 50) return theme.palette.warning.main;
+                                                return theme.palette.error.main;
+                                              })(),
+                                            }}
+                                          />
+                                          <Box
+                                            sx={{
+                                              top: 0,
+                                              left: 0,
+                                              bottom: 0,
+                                              right: 0,
+                                              position: 'absolute',
+                                              display: 'flex',
+                                              alignItems: 'center',
+                                              justifyContent: 'center',
+                                            }}
+                                          >
+                                            <Typography variant="caption" component="div" sx={{ fontSize: '0.6rem' }}>
+                                              {`${assignment.confidence}%`}
+                                            </Typography>
+                                          </Box>
+                                        </Box>
+                                      </Box>
+                                    ) : (
+                                      <Typography variant="body2" color="text.secondary">
+                                        —
+                                      </Typography>
+                                    )}
+                                  </TableCell>
+                                  
+                                  {/* Date */}
+                                  <TableCell sx={{ verticalAlign: 'top', p: 1.5 }}>
+                                    <Typography variant="caption" color="text.secondary">
+                                      {assignment.created_at ? new Date(assignment.created_at).toLocaleDateString() : 'Unknown'}
+                                    </Typography>
+                                  </TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        </TableContainer>
+                      </Box>
+                    )}
+                  </CardContent>
+                </Card>
+              </Box>
+            </Collapse>
+          </TableCell>
+        </TableRow>
+      </React.Fragment>
+    );
+  };
+
   return (
     <Box sx={{ 
       display: 'flex', 
@@ -1571,233 +1908,118 @@ const MergingPage = ({ projectId, codes = [], codeAssignments = [], documents = 
       
       {/* Compare Tab Content */}
       {getContentTabIndex(activeTab) === 1 && (
-        processedData.length > 0 ? (
-        <TableContainer component={Paper} variant="outlined" sx={{ 
-          borderRadius: 0,
-          flexGrow: 1, 
-          overflow: 'auto',
-          maxHeight: 'calc(100vh - 280px)',
-          '&::-webkit-scrollbar': {
-            width: '6px',
-          },
-          '&::-webkit-scrollbar-track': {
-            background: theme.palette.mode === 'dark' 
-              ? alpha(theme.palette.common.white, 0.05)
-              : alpha(theme.palette.common.black, 0.03),
-            borderRadius: '3px',
-          },
-          '&::-webkit-scrollbar-thumb': {
-            background: theme.palette.mode === 'dark'
-              ? alpha(theme.palette.common.white, 0.15)
-              : alpha(theme.palette.common.black, 0.15),
-            borderRadius: '3px',
-            '&:hover': {
-              background: theme.palette.mode === 'dark'
-                ? alpha(theme.palette.common.white, 0.25)
-                : alpha(theme.palette.common.black, 0.25),
-            },
-          },
-        }}>
-          <Table size="small">
-            <TableHead>
-              <TableRow>
-                <TableCell sx={{ fontWeight: 600, fontSize: '0.75rem', py: 0.75 }}>Document</TableCell>
-                <TableCell sx={{ fontWeight: 600, fontSize: '0.75rem', py: 0.75 }}>Selected Text</TableCell>
-                <TableCell sx={{ fontWeight: 600, fontSize: '0.75rem', py: 0.75 }}>Manual Code</TableCell>
-                <TableCell sx={{ fontWeight: 600, fontSize: '0.75rem', py: 0.75 }}>AI Code</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {processedData.map((item) => (
-                <TableRow key={item.start_char + '-' + item.end_char} hover sx={{
-                  cursor: 'pointer',
-                  '&:hover': {
-                    backgroundColor: alpha(theme.palette.primary.main, 0.05),
-                  },
-                }}>
-                  <TableCell>
-                    <Typography variant="body2">{item.documentName}</Typography>
-                  </TableCell>
-                  <TableCell>
-                    <Typography variant="body2">{truncateText(item.text_snapshot, 100)}</Typography>
-                  </TableCell>
-                  <TableCell>
-                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                      {item.assignments.map((assignment, index) => (
-                                                  <Box key={index} sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                            <Chip
-                              label={getCodeData(assignment).manual.name || '-'}
-                              sx={{
-                                backgroundColor: (() => {
-                                  if (!getCodeData(assignment).manual.name) {
-                                    return alpha(theme.palette.grey[500], 0.1);
-                                  }
-                                  const status = assignmentStatus[assignment.id] || 'pending';
-                                  if (status === 'pending') return theme.palette.warning.main;
-                                  if (status === 'accepted') return theme.palette.success.main;
-                                  if (status === 'rejected') return theme.palette.error.main;
-                                  return getCodeData(assignment).manual.color;
-                                })(),
-                                color: (() => {
-                                  if (!getCodeData(assignment).manual.name) {
-                                    return theme.palette.grey[600];
-                                  }
-                                  const status = assignmentStatus[assignment.id] || 'pending';
-                                  if (status === 'pending') return theme.palette.getContrastText(theme.palette.warning.main);
-                                  if (status === 'accepted') return theme.palette.getContrastText(theme.palette.success.main);
-                                  if (status === 'rejected') return theme.palette.getContrastText(theme.palette.error.main);
-                                  return theme.palette.getContrastText(getCodeData(assignment).manual.color);
-                                })(),
-                              '& .MuiChip-label': { fontWeight: 500 }
-                            }}
-                          />
-                          <Tooltip title="Accept Assignment">
-                            <IconButton 
-                              size="small" 
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleAcceptAssignment(assignment.id);
-                              }}
-                              sx={{
-                                color: assignmentStatus[assignment.id] === 'accepted' ? 
-                                  theme.palette.success.main : theme.palette.grey[500],
-                              }}
-                            >
-                              <CheckCircleIcon fontSize="small" />
-                            </IconButton>
-                          </Tooltip>
-                          <Tooltip title="Reject Assignment">
-                            <IconButton 
-                              size="small" 
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleRejectAssignment(assignment.id);
-                              }}
-                               sx={{
-                                color: assignmentStatus[assignment.id] === 'rejected' ? 
-                                  theme.palette.error.main : theme.palette.grey[500],
-                              }}
-                            >
-                              <CancelIcon fontSize="small" />
-                            </IconButton>
-                          </Tooltip>
-                        </Box>
-                      ))}
-                    </Box>
-                  </TableCell>
-                  <TableCell>
-                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                      {/* Check if any assignment in this item has an AI code */}
-                      {item.assignments.some(assignment => getCodeData(assignment).ai.name) ? (
-                        // Show individual AI codes if any exist
-                        item.assignments.map((assignment, index) => (
-                          <Box key={index} sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                            {getCodeData(assignment).ai.name ? (
-                              <>
-                                <Chip
-                                  label={getCodeData(assignment).ai.name}
-                                  sx={{
-                                    backgroundColor: (() => {
-                                      const status = assignmentStatus[assignment.id] || 'pending';
-                                      if (status === 'pending') return alpha(theme.palette.warning.main, 0.8);
-                                      if (status === 'accepted') return alpha(theme.palette.success.main, 0.8);
-                                      if (status === 'rejected') return alpha(theme.palette.error.main, 0.8);
-                                      return alpha(getCodeData(assignment).ai.color, 0.8);
-                                    })(),
-                                    color: (() => {
-                                      const status = assignmentStatus[assignment.id] || 'pending';
-                                      if (status === 'pending') return theme.palette.getContrastText(theme.palette.warning.main);
-                                      if (status === 'accepted') return theme.palette.getContrastText(theme.palette.success.main);
-                                      if (status === 'rejected') return theme.palette.getContrastText(theme.palette.error.main);
-                                      return theme.palette.getContrastText(getCodeData(assignment).ai.color);
-                                    })(),
-                                    '& .MuiChip-label': { fontWeight: 500 }
-                                  }}
-                                />
-                                <Tooltip title="Accept Assignment">
-                                <IconButton 
-                                  size="small" 
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleAcceptAssignment(assignment.id);
-                                  }}
-                                  sx={{
-                                    color: assignmentStatus[assignment.id] === 'accepted' ? 
-                                      theme.palette.success.main : theme.palette.grey[500],
-                                  }}
-                                >
-                                  <CheckCircleIcon fontSize="small" />
-                                </IconButton>
-                              </Tooltip>
-                              <Tooltip title="Reject Assignment">
-                                <IconButton 
-                                  size="small" 
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleRejectAssignment(assignment.id);
-                                  }}
-                                   sx={{
-                                    color: assignmentStatus[assignment.id] === 'rejected' ? 
-                                      theme.palette.error.main : theme.palette.grey[500],
-                                  }}
-                                >
-                                  <CancelIcon fontSize="small" />
-                                </IconButton>
-                              </Tooltip>
-                              </>
-                            ) : null}
-                          </Box>
-                        ))
-                      ) : (
-                        // Show single ❌ if no AI codes exist in the entire overlapping cluster
-                        <Typography variant="body2" color="text.secondary" sx={{ fontStyle: 'normal', fontSize: '1.2rem' }}>
-                          ❌
-                        </Typography>
-                      )}
-                    </Box>
-                  </TableCell>
-                  
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </TableContainer>
-        ) : (
-          <Fade in={true} style={{ transitionDelay: '300ms' }}>
-            <FrostedGlassPaper 
-              sx={{ 
-                p: 4, 
-                textAlign: 'center',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                gap: 2,
-                border: `1px dashed ${alpha(theme.palette.info.main, 0.3)}`,
-                borderRadius: theme.shape.borderRadius * 3,
-              }}
-            >
-              <Avatar
-                sx={{
-                  width: 80,
-                  height: 80,
-                  bgcolor: alpha(theme.palette.info.main, 0.1),
-                  mb: 1,
+        <Box sx={{ flexGrow: 1, overflow: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
+          <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>
+            Collaborator Submissions
+          </Typography>
+          
+          {loadingCollaboratorData ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', p: 3 }}>
+              <CircularProgress />
+            </Box>
+          ) : processedCollaboratorData.length > 0 ? (
+            <TableContainer component={Paper} variant="outlined" sx={{ 
+              borderRadius: 0,
+              flexGrow: 1, 
+              overflow: 'auto',
+              maxHeight: 'calc(100vh - 280px)',
+              '&::-webkit-scrollbar': {
+                width: '6px',
+              },
+              '&::-webkit-scrollbar-track': {
+                background: theme.palette.mode === 'dark' 
+                  ? alpha(theme.palette.common.white, 0.05)
+                  : alpha(theme.palette.common.black, 0.03),
+                borderRadius: '3px',
+              },
+              '&::-webkit-scrollbar-thumb': {
+                background: theme.palette.mode === 'dark'
+                  ? alpha(theme.palette.common.white, 0.15)
+                  : alpha(theme.palette.common.black, 0.15),
+                borderRadius: '3px',
+                '&:hover': {
+                  background: theme.palette.mode === 'dark'
+                    ? alpha(theme.palette.common.white, 0.25)
+                    : alpha(theme.palette.common.black, 0.25),
+                },
+              },
+            }}>
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell sx={{ fontWeight: 600, fontSize: '0.75rem', py: 0.75 }}>Document</TableCell>
+                    <TableCell sx={{ fontWeight: 600, fontSize: '0.75rem', py: 0.75 }}>Selected Text</TableCell>
+                    <TableCell sx={{ fontWeight: 600, fontSize: '0.75rem', py: 0.75 }}>Code</TableCell>
+                    <TableCell sx={{ fontWeight: 600, fontSize: '0.75rem', py: 0.75 }}>Collaborator</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {processedCollaboratorData.flatMap(userSubmission => 
+                    userSubmission.clubbedData.map((club, clubIndex) => 
+                      renderCollaboratorTableRow(club, userSubmission, clubIndex)
+                    )
+                  )}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          ) : (
+            <Fade in={true} style={{ transitionDelay: '300ms' }}>
+              <FrostedGlassPaper 
+                sx={{ 
+                  p: 4, 
+                  textAlign: 'center',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  gap: 2,
+                  border: `1px dashed ${alpha(theme.palette.info.main, 0.3)}`,
+                  borderRadius: theme.shape.borderRadius * 3,
                 }}
               >
-                <CompareArrowsIcon sx={{ fontSize: 35, color: theme.palette.info.main }} />
-              </Avatar>
-              <Typography variant="h5" sx={{ fontWeight: 700, mb: 1 }}>
-                No Comparisons Available
-              </Typography>
-              <Typography variant="body1" color="text.secondary" sx={{ maxWidth: 500, mb: 3, lineHeight: 1.6 }}>
-                {searchQuery 
-                  ? 'Try adjusting your search terms or filters to find comparisons.'
-                  : 'Start by adding manual codes and AI suggestions to compare them.'
-                }
-              </Typography>
-            </FrostedGlassPaper>
-          </Fade>
-        )
+                <Avatar
+                  sx={{
+                    width: 80,
+                    height: 80,
+                    bgcolor: alpha(theme.palette.info.main, 0.1),
+                    mb: 1,
+                  }}
+                >
+                  <PeopleIcon sx={{ fontSize: 35, color: theme.palette.info.main }} />
+                </Avatar>
+                <Typography variant="h5" sx={{ fontWeight: 700, mb: 1 }}>
+                  {hasCollaborators ? "No Code Submissions Yet" : "No Collaborators"}
+                </Typography>
+                <Typography variant="body1" color="text.secondary" sx={{ maxWidth: 500, mb: 3, lineHeight: 1.6 }}>
+                  {hasCollaborators ? 
+                    "Your collaborators haven't submitted any codes yet. When they do, their coded data will appear here." :
+                    "You don't have any collaborators for this project. Invite collaborators to help with the coding process."
+                  }
+                </Typography>
+
+                {!hasCollaborators && (
+                  <Button
+                    variant="contained"
+                    color="primary"
+                    startIcon={<PeopleIcon />}
+                    sx={{
+                      borderRadius: theme.shape.borderRadius * 2,
+                      px: 3,
+                      py: 1,
+                      fontWeight: 600,
+                      textTransform: 'none',
+                    }}
+                    onClick={() => {
+                      // Could navigate to a page to manage collaborators
+                      console.log("Navigate to invite collaborators");
+                    }}
+                  >
+                    Invite Collaborators
+                  </Button>
+                )}
+              </FrostedGlassPaper>
+            </Fade>
+          )}
+        </Box>
       )}
       
       {/* Finalize Codebook Tab Content */}
