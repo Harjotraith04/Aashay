@@ -108,11 +108,37 @@ const MergingPage = ({ projectId, codes = [], codeAssignments = [], documents = 
   // Initialize assignment status from codeAssignments data
   useEffect(() => {
     const statusMap = {};
+    
+    // Initialize owner assignments
     codeAssignments.forEach(assignment => {
       statusMap[assignment.id] = assignment.status || 'pending';
     });
+    
     setAssignmentStatus(statusMap);
   }, [codeAssignments]);
+
+  // Initialize collaborator assignment status separately to avoid circular dependency
+  useEffect(() => {
+    if (!collaboratorSubmissions || collaboratorSubmissions.length === 0) {
+      return;
+    }
+
+    setAssignmentStatus(prevStatus => {
+      const newStatusMap = { ...prevStatus };
+      
+      // Add collaborator assignments directly from collaboratorSubmissions
+      collaboratorSubmissions.forEach(userSubmission => {
+        if (userSubmission.assignments) {
+          userSubmission.assignments.forEach(assignment => {
+            // Use assignment_id as key for collaborator assignments
+            newStatusMap[assignment.assignment_id] = assignment.status || 'pending';
+          });
+        }
+      });
+      
+      return newStatusMap;
+    });
+  }, [collaboratorSubmissions]);
 
   // Helper function to get document name
   const getDocName = useMemo(() => (assignment) => {
@@ -186,19 +212,45 @@ const MergingPage = ({ projectId, codes = [], codeAssignments = [], documents = 
   const handleSaveAndUpload = async () => {
     setIsSaving(true);
     try {
-      // Get all assignments with their current status
-      const acceptedAssignments = Object.entries(assignmentStatus)
-        .filter(([_, status]) => status === 'accepted')
+      // Get all assignments with their current status from owner assignments
+      const ownerAcceptedAssignments = Object.entries(assignmentStatus)
+        .filter(([id, status]) => status === 'accepted' && codeAssignments.some(a => a.id === parseInt(id)))
         .map(([id]) => parseInt(id));
       
-      const rejectedAssignments = Object.entries(assignmentStatus)
-        .filter(([_, status]) => status === 'rejected')
+      const ownerRejectedAssignments = Object.entries(assignmentStatus)
+        .filter(([id, status]) => status === 'rejected' && codeAssignments.some(a => a.id === parseInt(id)))
         .map(([id]) => parseInt(id));
-
-      console.log('Saving changes:', {
-        accepted_assignment_ids: acceptedAssignments,
-        rejected_assignment_ids: rejectedAssignments
-      });
+      
+      // Get all assignments with their current status from collaborator assignments
+      const collabAcceptedAssignments = (processedCollaboratorData && processedCollaboratorData.length > 0) ? 
+        Object.entries(assignmentStatus)
+          .filter(([id, status]) => 
+            status === 'accepted' && 
+            processedCollaboratorData.some(user => 
+              user.clubbedData && user.clubbedData.some(club => 
+                club.assignments.some(a => a.assignment_id === parseInt(id))
+              )
+            )
+          )
+          .map(([id]) => parseInt(id))
+        : [];
+      
+      const collabRejectedAssignments = (processedCollaboratorData && processedCollaboratorData.length > 0) ? 
+        Object.entries(assignmentStatus)
+          .filter(([id, status]) => 
+            status === 'rejected' && 
+            processedCollaboratorData.some(user => 
+              user.clubbedData && user.clubbedData.some(club => 
+                club.assignments.some(a => a.assignment_id === parseInt(id))
+              )
+            )
+          )
+          .map(([id]) => parseInt(id))
+        : [];
+      
+      // Combine all assignments
+      const accepted_assignment_ids = [...ownerAcceptedAssignments, ...collabAcceptedAssignments];
+      const rejected_assignment_ids = [...ownerRejectedAssignments, ...collabRejectedAssignments];
 
       // Call the bulk update API
       const response = await apiRequest('/code-review/assignments/bulk-update', {
@@ -207,8 +259,8 @@ const MergingPage = ({ projectId, codes = [], codeAssignments = [], documents = 
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          accepted_assignment_ids: acceptedAssignments,
-          rejected_assignment_ids: rejectedAssignments
+          accepted_assignment_ids,
+          rejected_assignment_ids
         })
       });
       
@@ -1307,26 +1359,82 @@ const MergingPage = ({ projectId, codes = [], codeAssignments = [], documents = 
                       label={assignment.code.name}
                       size="small"
                       sx={{
-                        backgroundColor: assignment.code.color || theme.palette.primary.main,
-                        color: theme.palette.getContrastText(assignment.code.color || theme.palette.primary.main),
+                        backgroundColor: (() => {
+                          const status = assignmentStatus[assignment.assignment_id] || 'pending';
+                          if (status === 'pending') return theme.palette.warning.main;
+                          if (status === 'accepted') return theme.palette.success.main;
+                          if (status === 'rejected') return theme.palette.error.main;
+                          return assignment.code.color || theme.palette.primary.main;
+                        })(),
+                        color: (() => {
+                          const status = assignmentStatus[assignment.assignment_id] || 'pending';
+                          if (status === 'pending') return theme.palette.getContrastText(theme.palette.warning.main);
+                          if (status === 'accepted') return theme.palette.getContrastText(theme.palette.success.main);
+                          if (status === 'rejected') return theme.palette.getContrastText(theme.palette.error.main);
+                          return theme.palette.getContrastText(assignment.code.color || theme.palette.primary.main);
+                        })(),
                         '& .MuiChip-label': { fontWeight: 500 },
                       }}
                     />
                   ))}
                   <Typography variant="caption" color="text.secondary" sx={{ alignSelf: 'center', ml: 1 }}>
-                    ({club.assignments.length} codes - expand to view)
+                    ({club.assignments.length} codes - expand to manage)
                   </Typography>
                 </Box>
               ) : (
-                // When single code
-                <Chip
-                  label={club.assignments[0].code.name}
-                  sx={{
-                    backgroundColor: club.assignments[0].code.color || theme.palette.primary.main,
-                    color: theme.palette.getContrastText(club.assignments[0].code.color || theme.palette.primary.main),
-                    '& .MuiChip-label': { fontWeight: 500 },
-                  }}
-                />
+                // When single code, show with buttons
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  <Chip
+                    label={club.assignments[0].code.name}
+                    sx={{
+                      backgroundColor: (() => {
+                        const status = assignmentStatus[club.assignments[0].assignment_id] || 'pending';
+                        if (status === 'pending') return theme.palette.warning.main;
+                        if (status === 'accepted') return theme.palette.success.main;
+                        if (status === 'rejected') return theme.palette.error.main;
+                        return club.assignments[0].code.color || theme.palette.primary.main;
+                      })(),
+                      color: (() => {
+                        const status = assignmentStatus[club.assignments[0].assignment_id] || 'pending';
+                        if (status === 'pending') return theme.palette.getContrastText(theme.palette.warning.main);
+                        if (status === 'accepted') return theme.palette.getContrastText(theme.palette.success.main);
+                        if (status === 'rejected') return theme.palette.getContrastText(theme.palette.error.main);
+                        return theme.palette.getContrastText(club.assignments[0].code.color || theme.palette.primary.main);
+                      })(),
+                      '& .MuiChip-label': { fontWeight: 500 },
+                    }}
+                  />
+                  <Tooltip title="Accept Assignment">
+                    <IconButton 
+                      size="small" 
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleAcceptAssignment(club.assignments[0].assignment_id);
+                      }}
+                      sx={{
+                        color: assignmentStatus[club.assignments[0].assignment_id] === 'accepted' ? 
+                          theme.palette.success.main : theme.palette.grey[500],
+                      }}
+                    >
+                      <CheckCircleIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                  <Tooltip title="Reject Assignment">
+                    <IconButton 
+                      size="small" 
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleRejectAssignment(club.assignments[0].assignment_id);
+                      }}
+                      sx={{
+                        color: assignmentStatus[club.assignments[0].assignment_id] === 'rejected' ? 
+                          theme.palette.error.main : theme.palette.grey[500],
+                      }}
+                    >
+                      <CancelIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                </Box>
               )}
             </Box>
           </TableCell>
@@ -1398,7 +1506,7 @@ const MergingPage = ({ projectId, codes = [], codeAssignments = [], documents = 
                                 <TableCell sx={{ fontWeight: 600, color: 'text.primary' }}>Code</TableCell>
                                 <TableCell sx={{ fontWeight: 600, color: 'text.primary' }}>Description</TableCell>
                                 <TableCell sx={{ fontWeight: 600, color: 'text.primary' }}>Confidence</TableCell>
-                                <TableCell sx={{ fontWeight: 600, color: 'text.primary' }}>Date</TableCell>
+                                <TableCell sx={{ fontWeight: 600, color: 'text.primary' }}>Action</TableCell>
                               </TableRow>
                             </TableHead>
                             <TableBody>
@@ -1420,8 +1528,20 @@ const MergingPage = ({ projectId, codes = [], codeAssignments = [], documents = 
                                       label={assignment.code.name}
                                       size="small"
                                       sx={{
-                                        backgroundColor: assignment.code.color || theme.palette.primary.main,
-                                        color: theme.palette.getContrastText(assignment.code.color || theme.palette.primary.main),
+                                        backgroundColor: (() => {
+                                          const status = assignmentStatus[assignment.assignment_id] || 'pending';
+                                          if (status === 'pending') return theme.palette.warning.main;
+                                          if (status === 'accepted') return theme.palette.success.main;
+                                          if (status === 'rejected') return theme.palette.error.main;
+                                          return assignment.code.color || theme.palette.primary.main;
+                                        })(),
+                                        color: (() => {
+                                          const status = assignmentStatus[assignment.assignment_id] || 'pending';
+                                          if (status === 'pending') return theme.palette.getContrastText(theme.palette.warning.main);
+                                          if (status === 'accepted') return theme.palette.getContrastText(theme.palette.success.main);
+                                          if (status === 'rejected') return theme.palette.getContrastText(theme.palette.error.main);
+                                          return theme.palette.getContrastText(assignment.code.color || theme.palette.primary.main);
+                                        })(),
                                         '& .MuiChip-label': { fontWeight: 500 },
                                       }}
                                     />
@@ -1477,11 +1597,40 @@ const MergingPage = ({ projectId, codes = [], codeAssignments = [], documents = 
                                     )}
                                   </TableCell>
                                   
-                                  {/* Date */}
+                                  {/* Actions */}
                                   <TableCell sx={{ verticalAlign: 'top', p: 1.5 }}>
-                                    <Typography variant="caption" color="text.secondary">
-                                      {assignment.created_at ? new Date(assignment.created_at).toLocaleDateString() : 'Unknown'}
-                                    </Typography>
+                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                      <Tooltip title="Accept Assignment">
+                                        <IconButton 
+                                          size="small" 
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleAcceptAssignment(assignment.assignment_id);
+                                          }}
+                                          sx={{
+                                            color: assignmentStatus[assignment.assignment_id] === 'accepted' ? 
+                                              theme.palette.success.main : theme.palette.grey[500],
+                                          }}
+                                        >
+                                          <CheckCircleIcon fontSize="small" />
+                                        </IconButton>
+                                      </Tooltip>
+                                      <Tooltip title="Reject Assignment">
+                                        <IconButton 
+                                          size="small" 
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleRejectAssignment(assignment.assignment_id);
+                                          }}
+                                          sx={{
+                                            color: assignmentStatus[assignment.assignment_id] === 'rejected' ? 
+                                              theme.palette.error.main : theme.palette.grey[500],
+                                          }}
+                                        >
+                                          <CancelIcon fontSize="small" />
+                                        </IconButton>
+                                      </Tooltip>
+                                    </Box>
                                   </TableCell>
                                 </TableRow>
                               ))}
@@ -1657,8 +1806,8 @@ const MergingPage = ({ projectId, codes = [], codeAssignments = [], documents = 
                 (() => {
                   const pendingChanges = Object.values(assignmentStatus).filter(status => status !== 'pending').length;
                   return pendingChanges > 0 
-                    ? `Save ${pendingChanges} Change${pendingChanges > 1 ? 's' : ''} & Compare`
-                    : 'Save & Compare';
+                    ? `Save ${pendingChanges} Change${pendingChanges > 1 ? 's' : ''}`
+                    : 'Save Changes';
                 })()
               }
             </Button>
@@ -1909,9 +2058,12 @@ const MergingPage = ({ projectId, codes = [], codeAssignments = [], documents = 
       {/* Compare Tab Content */}
       {getContentTabIndex(activeTab) === 1 && (
         <Box sx={{ flexGrow: 1, overflow: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
-          <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>
-            Collaborator Submissions
-          </Typography>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+            <Typography variant="h6" sx={{ fontWeight: 600 }}>
+              Collaborator Submissions
+            </Typography>
+            
+          </Box>
           
           {loadingCollaboratorData ? (
             <Box sx={{ display: 'flex', justifyContent: 'center', p: 3 }}>
@@ -2136,47 +2288,177 @@ const MergingPage = ({ projectId, codes = [], codeAssignments = [], documents = 
               })()}
             </Box>
           ) : (
-            // Owner view: Original finalize codebook content
-            <Fade in={true} style={{ transitionDelay: '100ms' }}>
-              <FrostedGlassPaper 
-                sx={{ 
-                  p: 4, 
-                  textAlign: 'center',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  alignItems: 'center',
-                  gap: 2,
-                  border: `1px dashed ${alpha(theme.palette.success.main, 0.3)}`,
-                  borderRadius: theme.shape.borderRadius * 3,
-                }}
-              >
-                <Avatar
-                  sx={{
-                    width: 80,
-                    height: 80,
-                    bgcolor: alpha(theme.palette.success.main, 0.1),
-                    mb: 1,
-                  }}
-                >
-                  <DoneAllIcon sx={{ fontSize: 35, color: theme.palette.success.main }} />
-                </Avatar>
-                <Typography variant="h5" sx={{ fontWeight: 700, mb: 1 }}>
-                  Finalize Your Codebook
-                </Typography>
-                <Typography variant="body1" color="text.secondary" sx={{ maxWidth: 500, mb: 3, lineHeight: 1.6 }}>
-                  Create the final version of your codebook by merging and refining codes from different coders.
-                </Typography>
-                <GlowButton
-                  variant="contained"
-                  color="success"
-                  startIcon={<BookIcon />}
-                  size="large"
-                  sx={{ borderRadius: theme.shape.borderRadius * 2 }}
-                >
-                  Build Codebook
-                </GlowButton>
-              </FrostedGlassPaper>
-            </Fade>
+            // Owner view: Show all accepted codes from owner and collaborators
+            <Box>
+              <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>
+                Final Codebook
+              </Typography>
+              
+              {(() => {
+                // Get all accepted codes from both owner and collaborators
+                const ownerAcceptedAssignments = codeAssignments.filter(assignment => 
+                  assignmentStatus[assignment.id] === 'accepted'
+                );
+                
+                // Get collaborator accepted codes - safely check for processedCollaboratorData
+                const collaboratorAcceptedCodes = processedCollaboratorData && processedCollaboratorData.length > 0 ? 
+                  processedCollaboratorData.flatMap(userSubmission => 
+                    userSubmission.clubbedData ? userSubmission.clubbedData.flatMap(club => 
+                      club.assignments.filter(assignment => 
+                        assignmentStatus[assignment.assignment_id] === 'accepted'
+                      )
+                    ) : []
+                  ) : [];
+                
+                const allAcceptedCodes = [...ownerAcceptedAssignments, ...collaboratorAcceptedCodes];
+                
+                return allAcceptedCodes.length > 0 ? (
+                  <Box>
+                    <TableContainer component={Paper} variant="outlined" sx={{ mb: 3 }}>
+                      <Table size="small">
+                        <TableHead>
+                          <TableRow>
+                            <TableCell sx={{ fontWeight: 600, fontSize: '0.75rem', py: 0.75 }}>Document</TableCell>
+                            <TableCell sx={{ fontWeight: 600, fontSize: '0.75rem', py: 0.75 }}>Selected Text</TableCell>
+                            <TableCell sx={{ fontWeight: 600, fontSize: '0.75rem', py: 0.75 }}>Code</TableCell>
+                            <TableCell sx={{ fontWeight: 600, fontSize: '0.75rem', py: 0.75 }}>Source</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {ownerAcceptedAssignments.map((assignment) => {
+                            const codeData = getCodeData(assignment);
+                            const documentName = assignment.document_name || '';
+                            
+                            return (
+                              <TableRow key={`owner-${assignment.id}`} hover>
+                                <TableCell>
+                                  <Typography variant="body2">{documentName}</Typography>
+                                </TableCell>
+                                <TableCell>
+                                  <Typography variant="body2">
+                                    {assignment.text_snapshot ? 
+                                      (assignment.text_snapshot.length > 100 ? 
+                                        assignment.text_snapshot.substring(0, 100) + '...' : 
+                                        assignment.text_snapshot
+                                      ) : 'No text snapshot'
+                                    }
+                                  </Typography>
+                                </TableCell>
+                                <TableCell>
+                                  <Chip
+                                    label={codeData.manual.name || codeData.ai.name || 'Unknown Code'}
+                                    sx={{
+                                      backgroundColor: theme.palette.success.main,
+                                      color: theme.palette.getContrastText(theme.palette.success.main),
+                                      '& .MuiChip-label': { fontWeight: 500 }
+                                    }}
+                                  />
+                                </TableCell>
+                                <TableCell>
+                                  <Chip
+                                    label="Owner"
+                                    size="small"
+                                    color="primary"
+                                    variant="outlined"
+                                  />
+                                </TableCell>
+                              </TableRow>
+                            );
+                          })}
+                          
+                          {collaboratorAcceptedCodes.map((assignment) => {
+                            const userName = processedCollaboratorData && processedCollaboratorData.find(
+                              user => user.clubbedData && user.clubbedData.some(club => 
+                                club.assignments.some(a => a.assignment_id === assignment.assignment_id)
+                              )
+                            )?.user_name || 'Collaborator';
+                            
+                            return (
+                              <TableRow key={`collab-${assignment.assignment_id}`} hover>
+                                <TableCell>
+                                  <Typography variant="body2">{assignment.document_name}</Typography>
+                                </TableCell>
+                                <TableCell>
+                                  <Typography variant="body2">
+                                    {assignment.text ? 
+                                      (assignment.text.length > 100 ? 
+                                        assignment.text.substring(0, 100) + '...' : 
+                                        assignment.text
+                                      ) : 'No text snapshot'
+                                    }
+                                  </Typography>
+                                </TableCell>
+                                <TableCell>
+                                  <Chip
+                                    label={assignment.code.name}
+                                    sx={{
+                                      backgroundColor: assignment.code.color || theme.palette.success.main,
+                                      color: theme.palette.getContrastText(assignment.code.color || theme.palette.success.main),
+                                      '& .MuiChip-label': { fontWeight: 500 }
+                                    }}
+                                  />
+                                </TableCell>
+                                <TableCell>
+                                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                    <Avatar sx={{ bgcolor: theme.palette.info.main, width: 24, height: 24 }}>
+                                      <PersonIcon sx={{ fontSize: 14 }} />
+                                    </Avatar>
+                                    <Typography variant="caption">{userName}</Typography>
+                                  </Box>
+                                </TableCell>
+                              </TableRow>
+                            );
+                          })}
+                        </TableBody>
+                      </Table>
+                    </TableContainer>
+                    
+                    {/* Finalize Button */}
+                    <Box sx={{ display: 'flex', justifyContent: 'center', mt: 3 }}>
+                      <GlowButton
+                        variant="contained"
+                        color="success"
+                        startIcon={<BookIcon />}
+                        size="large"
+                        sx={{ borderRadius: theme.shape.borderRadius * 2 }}
+                      >
+                        Finalize Codebook
+                      </GlowButton>
+                    </Box>
+                  </Box>
+                ) : (
+                  <FrostedGlassPaper 
+                    sx={{ 
+                      p: 4, 
+                      textAlign: 'center',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      gap: 2,
+                      border: `1px dashed ${alpha(theme.palette.success.main, 0.3)}`,
+                      borderRadius: theme.shape.borderRadius * 3,
+                    }}
+                  >
+                    <Avatar
+                      sx={{
+                        width: 80,
+                        height: 80,
+                        bgcolor: alpha(theme.palette.success.main, 0.1),
+                        mb: 1,
+                      }}
+                    >
+                      <DoneAllIcon sx={{ fontSize: 35, color: theme.palette.success.main }} />
+                    </Avatar>
+                    <Typography variant="h5" sx={{ fontWeight: 700, mb: 1 }}>
+                      No Accepted Codes Found
+                    </Typography>
+                    <Typography variant="body1" color="text.secondary" sx={{ maxWidth: 500, mb: 3, lineHeight: 1.6 }}>
+                      Accept codes from your review (Edit tab) or from collaborator submissions (Collaborator tab) to build your final codebook.
+                    </Typography>
+                  </FrostedGlassPaper>
+                );
+              })()}
+            </Box>
           )}
         </Box>
       )}
