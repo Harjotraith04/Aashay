@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import selectinload
 from typing import List, Optional
 from pydantic import BaseModel
 
@@ -7,6 +8,8 @@ from app.db.session import get_db
 from app.core.auth import get_current_user
 from app.models.user import User
 from app.services.code_review_service import CodeReviewService
+from app.models.code_assignments import CodeAssignment as CodeAssignmentModel
+from app.core.permissions import PermissionChecker
 
 router = APIRouter()
 
@@ -73,6 +76,22 @@ async def bulk_update_assignment_status(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    # Permission check: ensure user is either creator or project owner for each assignment
+    all_ids = request.accepted_assignment_ids + request.rejected_assignment_ids
+    if all_ids:
+        assignments = db.query(CodeAssignmentModel).filter(
+            CodeAssignmentModel.id.in_(all_ids)
+        ).all()
+        if len(assignments) != len(all_ids):
+            raise HTTPException(
+                status_code=400, detail="Some assignments not found")
+        for a in assignments:
+            # if not creator, must be project owner
+            creator_id = getattr(a, 'created_by_id')
+            if creator_id != current_user.id:
+                project_id = getattr(a, 'project_id')
+                PermissionChecker.check_project_owner(
+                    db, project_id, current_user)
     try:
         result = CodeReviewService.bulk_review_assignments(
             db=db,

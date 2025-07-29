@@ -1,9 +1,7 @@
 from sqlalchemy.orm import Session, selectinload
 from typing import List, Dict, Any, Optional
-from fastapi import HTTPException
 
 from app.models.code_assignments import CodeAssignment as CodeAssignmentModel
-from app.models.codebook import Codebook
 from app.models.code import Code
 from app.models.user import User
 from app.core.permissions import PermissionChecker
@@ -162,38 +160,46 @@ class CodeReviewService:
         status: str,
         user_id: int
     ) -> Dict[str, Any]:
-    
+
         if status not in ["pending", "accepted", "rejected"]:
             raise ValueError(
                 "Invalid status. Must be 'pending', 'accepted', or 'rejected'")
-    
+
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
             raise ValueError("User not found")
-    
-        # Get assignments with codes and codebooks
+
+        # Load all requested assignments
         assignments = db.query(CodeAssignmentModel).options(
             selectinload(CodeAssignmentModel.code).selectinload(Code.codebook)
         ).filter(
-            CodeAssignmentModel.id.in_(assignment_ids),
-            CodeAssignmentModel.created_by_id == user_id
+            CodeAssignmentModel.id.in_(assignment_ids)
         ).all()
-    
+
+        # Ensure all assignments exist
         if len(assignments) != len(assignment_ids):
             found_ids = [a.id for a in assignments]
             missing_ids = [
                 aid for aid in assignment_ids if aid not in found_ids]
-            raise ValueError(
-                f"Assignments not found or access denied: {missing_ids}")
-    
+            raise ValueError(f"Assignments not found: {missing_ids}")
+
+        # Permission check per assignment: creator or project owner
+        for assignment in assignments:
+            # Permission: only creator or project owner
+            creator_id = getattr(assignment, 'created_by_id')
+            if creator_id != user_id:
+                proj_id = getattr(assignment, 'project_id')
+                PermissionChecker.check_project_owner(db, proj_id, user)
+
+        # Update statuses
         for assignment in assignments:
             setattr(assignment, 'status', status)
             db.add(assignment)
-    
+
         db.commit()
         for assignment in assignments:
             db.refresh(assignment)
-    
+
         return {
             "updated_count": len(assignments),
             "status": status,

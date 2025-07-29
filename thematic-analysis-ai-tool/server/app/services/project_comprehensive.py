@@ -69,111 +69,32 @@ class ProjectComprehensiveService:
         user_codebooks = ProjectSerializer.get_user_codebooks(
             db, user_codes, user_id, project_id)
 
-        # Get finalized code assignments and codes
+        # Get finalized submitted assignments by user(s) within this project
         submitted_assignments_by_user = []
-
+        # Determine users to include: owner includes collaborators and themselves, else only current user
+        user_list = []
         if is_owner:
-            # If the user is the owner, include all collaborators' finalized assignments
-            for collaborator in project.collaborators:
-                collaborator_assignments = db.query(CodeAssignment).filter(
-                    CodeAssignment.created_by_id == collaborator.id,  # type: ignore
-                    CodeAssignment.is_submitted == True
-                ).options(
-                    selectinload(CodeAssignment.code),
-                    selectinload(CodeAssignment.document)
-                ).all()
-
-                submitted_assignments_by_user.append({
-                    "user_id": collaborator.id,  # type: ignore
-                    "user_name": collaborator.name,  # type: ignore
-                    "assignments": [
-                        {
-                            "assignment_id": a.id,
-                            "text": a.text_snapshot,
-                            "start_char": a.start_char,
-                            "end_char": a.end_char,
-                            "confidence": a.confidence,
-                            "document_id": a.document_id,
-                            "document_name": a.document.name if a.document else None,  # type: ignore
-                            "code": {
-                                "id": a.code.id,
-                                "name": a.code.name,
-                                "description": a.code.description,
-                                "color": a.code.color
-                            },
-                            "created_at": a.created_at
-                        }
-                        for a in collaborator_assignments
-                    ]
-                })
-
-            # Include the owner's finalized assignments
-            owner_assignments = db.query(CodeAssignment).filter(
-                CodeAssignment.created_by_id == project.owner_id,  # type: ignore
-                CodeAssignment.is_submitted == True
-            ).options(
-                selectinload(CodeAssignment.code),
-                selectinload(CodeAssignment.document)
-            ).all()
-
-            submitted_assignments_by_user.append({
-                "user_id": project.owner_id,  # type: ignore
-                "user_name": project.owner.name,  # type: ignore
-                "assignments": [
-                    {
-                        "assignment_id": a.id,
-                        "text": a.text_snapshot,
-                        "start_char": a.start_char,
-                        "end_char": a.end_char,
-                        "confidence": a.confidence,
-                        "document_id": a.document_id,
-                        "document_name": a.document.name if a.document else None,  # type: ignore
-                        "code": {
-                            "id": a.code.id,
-                            "name": a.code.name,
-                            "description": a.code.description,
-                            "color": a.code.color
-                        },
-                        "created_at": a.created_at
-                    }
-                    for a in owner_assignments
-                ]
-            })
+            user_list = list(project.collaborators) + \
+                [project.owner]  # type: ignore
         else:
-            # If the user is not the owner, only include their own submitted assignments
-            user_submitted_assignments = db.query(CodeAssignment).filter(
-                CodeAssignment.created_by_id == user_id,
-                CodeAssignment.is_submitted == True
+            current_user = db.query(User).filter(User.id == user_id).first()
+            if current_user:
+                user_list = [current_user]
+        # Fetch assignments for each user
+        for usr in user_list:
+            assignments = db.query(CodeAssignment).filter(
+                CodeAssignment.created_by_id == usr.id,  # type: ignore
+                CodeAssignment.is_submitted == True,
+                CodeAssignment.project_id == project_id
             ).options(
                 selectinload(CodeAssignment.code),
                 selectinload(CodeAssignment.document)
             ).all()
-
-            # Get the current user's name
-            current_user = db.query(User).filter(User.id == user_id).first()
-            user_name = current_user.name if current_user else "Unknown User"
-
             submitted_assignments_by_user.append({
-                "user_id": user_id,
-                "user_name": user_name,
+                "user_id": usr.id,
+                "user_name": usr.name,  # type: ignore
                 "assignments": [
-                    {
-                        "assignment_id": a.id,
-                        "text": a.text_snapshot,
-                        "start_char": a.start_char,
-                        "end_char": a.end_char,
-                        "confidence": a.confidence,
-                        "document_id": a.document_id,
-                        "document_name": a.document.name if a.document else None,  # type: ignore
-                        "code": {
-                            "id": a.code.id,
-                            "name": a.code.name,
-                            "description": a.code.description,
-                            "color": a.code.color
-                        },
-                        "created_at": a.created_at
-                    }
-                    for a in user_submitted_assignments
+                    ProjectSerializer.serialize_code_assignment(a) for a in assignments
                 ]
             })
 
